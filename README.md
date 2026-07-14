@@ -37,6 +37,7 @@ what changed.
 - [Installation](#installation)
   - [Web UI (React + FastAPI)](#web-ui-react-fastapi)
 - [Run as a Linux service (systemd)](#run-as-a-linux-service-systemd)
+- [Run on Kubernetes](#run-on-kubernetes)
 - [Inputs](#inputs)
 - [Usage](#usage)
   - [Validate only](#validate-only)
@@ -314,6 +315,180 @@ After `git pull` or changing Python dependencies, run **`pip install -r
 requirements.txt`** (and **`npm run build`** if the frontend changed), then
 **`systemctl restart`**.
 
+## Run on Kubernetes
+
+The Web UI is a single process (FastAPI + uvicorn) that serves the built React
+SPA from `frontend/dist` on port **8000**. There is no Dockerfile or Helm chart
+in the repo yet (see [Roadmap](#frontend-ui)); use the patterns below to run it
+on a cluster.
+
+**Security model (same as local / systemd):** operators POST BIG-IP credentials
+to this app. Passwords are kept only in an **in-memory session** (about **45
+minutes** idle TTL) and are never written to disk or returned in API responses.
+Treat the workload as an **internal management-plane** console — TLS at Ingress,
+VPN / private DNS, NetworkPolicy egress limited to BIG-IP management ranges, and
+preferably an identity-aware proxy or SSO in front of the UI. Do **not** expose
+it on the public internet.
+
+### Constraints that drive the cluster design
+
+| Constraint | Implication |
+|------------|-------------|
+| Sessions are process-local (`server/app.py`) | Run **`replicas: 1`**. Horizontal scale requires an external session store the app does not have today. |
+| Remediate can download RPMs / provision modules / POST AS3+TS for many minutes | Set Ingress (and any reverse proxy) **read/send timeouts ≥ 900s** (same guidance as the Vite proxy and `run_server.py` banner). |
+| Optional RPM install writes under `./rpms` | Mount a writable volume at `/app/rpms` (EmptyDir or PVC). Air-gapped: pre-bake RPMs into the image or volume instead of allowing GitHub egress. |
+| Production entrypoint | Use **`uvicorn server.app:app --host 0.0.0.0 --port 8000`**. Do **not** use `run_server.py` in the cluster — it enables `--reload`. |
+| Health check | `GET /api/health` on port 8000 (liveness and readiness). |
+
+Traffic path: operator browser → Ingress (TLS) → ClusterIP Service `:8000` →
+app pod → BIG-IP management HTTPS (`:443`). Optional dashed egress to
+`api.github.com` / GitHub release CDN only when **Install missing AS3 / TS RPMs**
+is used (~55 MB combined).
+
+### Suggested multi-stage Dockerfile
+
+Build the UI with Node 18+, then a Python 3.10+ (3.12 recommended) runtime image
+that installs `requirements.txt`, copies app sources and `frontend/dist`, and
+runs as a non-root user:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM node:20-alpine AS ui
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM python:3.12-slim AS runtime
+WORKDIR /app
+RUN useradd -r -u 10001 appuser
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY --chown=appuser:appuser \
+  bigip_ts_validator.py as3_services.py ts_declaration_builder.py \
+  run_server.py server/ examples/ ./
+COPY --from=ui --chown=appuser:appuser /src/frontend/dist ./frontend/dist
+RUN mkdir -p /app/rpms && chown appuser:appuser /app/rpms
+USER appuser
+EXPOSE 8000
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+Build and push to your registry (adjust the image name and tag):
+
+```bash
+docker build -t YOUR_REGISTRY/bigip-ts-validator:VERSION .
+docker push YOUR_REGISTRY/bigip-ts-validator:VERSION
+```
+
+### Minimal Deployment and Service
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bigip-ts-validator
+  namespace: bigip-ts-tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bigip-ts-validator
+  template:
+    metadata:
+      labels:
+        app: bigip-ts-validator
+    spec:
+      containers:
+        - name: app
+          image: YOUR_REGISTRY/bigip-ts-validator:VERSION
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: rpm-cache
+              mountPath: /app/rpms
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+      volumes:
+        - name: rpm-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bigip-ts-validator
+  namespace: bigip-ts-tools
+spec:
+  selector:
+    app: bigip-ts-validator
+  ports:
+    - port: 8000
+      targetPort: http
+      name: http
+```
+
+Starting resource requests are deliberately small; raise memory if operators run
+concurrent remediations that cache large RPMs.
+
+### Ingress timeouts
+
+**nginx Ingress example annotations:**
+
+```yaml
+nginx.ingress.kubernetes.io/proxy-read-timeout: "900"
+nginx.ingress.kubernetes.io/proxy-send-timeout: "900"
+nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+```
+
+**Traefik:** configure a middleware (or IngressRoute) with responding /
+read timeouts of **900s** for the `/api` paths used by validate and remediate.
+Without this, long RPM installs or module provisioning often surface as **504**
+errors even though the pod is still working.
+
+Also terminate TLS on the Ingress and restrict who can reach the hostname
+(private DNS, allow-lists, or an auth proxy).
+
+### NetworkPolicy outline
+
+- **Ingress:** allow only from the Ingress controller (or mesh gateway) to
+  pod port 8000.
+- **Egress:** DNS; HTTPS to BIG-IP management CIDRs the operators will target;
+  optionally HTTPS to GitHub if RPM install from the UI is enabled. Deny
+  everything else by default.
+
+### Deploy and verify
+
+1. Create the namespace (for example `bigip-ts-tools`).
+2. Build and push the image; apply Deployment and Service (and NetworkPolicy).
+3. Attach an internal TLS Ingress with **≥900s** proxy timeouts.
+4. Check health: `curl -sS https://<host>/api/health`
+5. Open the UI, connect to a lab BIG-IP, run **validate** before any remediate.
+6. If using install-prereqs, confirm a full remediate finishes without Ingress
+   timeouts.
+
 ## Inputs
 
 | Input            | Where it goes                | Notes                                                                 |
@@ -531,7 +706,8 @@ remediate** again without re-installing RPMs.
 
 Delivered as `server/app.py` + `frontend/` (see **Web UI** above). Remaining
 nice-to-haves: library split for cleaner imports, SSE for long RPM installs,
-and a packaged `Dockerfile`.
+and a packaged `Dockerfile` / `deploy/k8s` manifests (deployment guidance for
+Kubernetes is documented under [Run on Kubernetes](#run-on-kubernetes)).
 
 ### Stretch
 
