@@ -94,6 +94,22 @@ def _provision_patch_busy_response(status_code: int, body: str) -> bool:
     )
 
 
+def _mgmt_plane_unavailable(status_code: int, body: str = "") -> bool:
+    """True when iControl REST / Configuration Utility is restarting or otherwise transiently down.
+
+    Common after extension install or module provisioning: HTTP **503** with an HTML page titled
+    ``BIG-IP® - Configuration Utility restarting...`` (tomcat_unavailable), or **502**/**504**.
+    """
+    if status_code in (502, 503, 504):
+        return True
+    t = (body or "").lower()
+    return (
+        "configuration utility restarting" in t
+        or "tomcat_unavailable" in t
+        or "service temporarily unavailable" in t
+    )
+
+
 def _extension_info_with_settle(
     client: BigIPClient,
     name: str,
@@ -165,19 +181,55 @@ class BigIPClient:
     def _delete(self, path: str) -> requests.Response:
         return self.session.delete(f"{self.base_url}{path}", timeout=self.timeout)
 
-    def provision_query(self) -> dict[str, str]:
-        """Return TMOS module slug (lowercase) -> provision level (lowercase)."""
-        resp = self._get("/mgmt/tm/sys/provision")
-        if resp.status_code != 200:
-            raise BigIPError(f"Could not read /mgmt/tm/sys/provision ({resp.status_code}): {resp.text[:500]}")
-        data = resp.json()
-        out: dict[str, str] = {}
-        for it in data.get("items", []):
-            name = str(it.get("name", "")).lower().strip()
-            if not name:
+    def provision_query(self, *, settle_timeout: int = 300, poll: float = 5.0) -> dict[str, str]:
+        """Return TMOS module slug (lowercase) -> provision level (lowercase).
+
+        Retries while the management plane is restarting (**503** Configuration Utility
+        page, etc.) — common immediately after RPM install or a prior provision PATCH.
+        """
+        deadline = time.time() + settle_timeout
+        last_err = ""
+        while True:
+            try:
+                resp = self._get("/mgmt/tm/sys/provision")
+            except requests.RequestException as exc:
+                last_err = str(exc)
+                if time.time() >= deadline:
+                    raise BigIPError(
+                        f"Could not reach /mgmt/tm/sys/provision after {settle_timeout}s: {exc}"
+                    ) from exc
+                time.sleep(poll)
+                try:
+                    self.reauthenticate()
+                except BigIPError:
+                    pass
                 continue
-            out[name] = str(it.get("level", "none")).lower().strip()
-        return out
+
+            if resp.status_code == 200:
+                data = resp.json()
+                out: dict[str, str] = {}
+                for it in data.get("items", []):
+                    name = str(it.get("name", "")).lower().strip()
+                    if not name:
+                        continue
+                    out[name] = str(it.get("level", "none")).lower().strip()
+                return out
+
+            last_err = f"({resp.status_code}): {(resp.text or '')[:500]}"
+            if _mgmt_plane_unavailable(resp.status_code, resp.text or ""):
+                if time.time() >= deadline:
+                    raise BigIPError(
+                        f"Could not read /mgmt/tm/sys/provision after {settle_timeout}s "
+                        f"(management plane still unavailable) {last_err}"
+                    )
+                time.sleep(poll)
+                try:
+                    self.reauthenticate()
+                except BigIPError:
+                    pass
+                continue
+
+            raise BigIPError(f"Could not read /mgmt/tm/sys/provision {last_err}")
 
     def patch_provision_level(
         self,
@@ -190,20 +242,31 @@ class BigIPClient:
         """PATCH a single module to the given provision level (default nominal).
 
         Retries on **400 / 01071003** when another provisioning operation is still
-        active, which is common when enabling several modules in one remediation.
+        active, and on **502/503/504** (Configuration Utility restarting), which is
+        common when enabling several modules or right after extension install.
         """
         mod = module.lower().strip()
         deadline = time.time() + busy_timeout
         last_body = ""
         while time.time() < deadline:
-            resp = self._patch(f"/mgmt/tm/sys/provision/{mod}", {"level": level})
+            try:
+                resp = self._patch(f"/mgmt/tm/sys/provision/{mod}", {"level": level})
+            except requests.RequestException:
+                time.sleep(busy_poll)
+                try:
+                    self.reauthenticate()
+                except BigIPError:
+                    pass
+                continue
             if resp.status_code in (200, 202):
                 try:
                     return resp.json() if resp.text.strip() else {}
                 except json.JSONDecodeError:
                     return {}
             last_body = resp.text or ""
-            if _provision_patch_busy_response(resp.status_code, last_body):
+            if _provision_patch_busy_response(resp.status_code, last_body) or _mgmt_plane_unavailable(
+                resp.status_code, last_body
+            ):
                 time.sleep(busy_poll)
                 try:
                     self.reauthenticate()
@@ -215,7 +278,7 @@ class BigIPClient:
             )
         raise BigIPError(
             f"Provisioning PATCH for {mod} timed out after {busy_timeout}s waiting for prior "
-            f"provisioning to finish (last response): {last_body[:800]}"
+            f"provisioning / management plane readiness (last response): {last_body[:800]}"
         )
 
     def configure_analytics_global_settings_for_avr(
@@ -817,11 +880,16 @@ def ensure_modules_provisioned(
     if not modules:
         return []
     patched: list[str] = []
+    # After RPM install the Configuration Utility often returns 503 HTML for a while.
+    settle = max(300, wait_timeout)
     for m in modules:
         try:
-            levels = client.provision_query()
+            levels = client.provision_query(settle_timeout=settle)
         except BigIPError as exc:
-            raise BigIPError(f"Cannot read provisioning state before PATCH: {exc}") from exc
+            raise BigIPError(
+                f"Cannot read provisioning state before PATCH (waited up to {settle}s for "
+                f"management plane / Configuration Utility): {exc}"
+            ) from exc
         cur = levels.get(m, "none")
         if cur in ("none", ""):
             client.patch_provision_level(m, level=level, busy_timeout=max(360, wait_timeout))

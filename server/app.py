@@ -211,12 +211,14 @@ def _session_remediate_impl(session_id: str, body: RemediateBody) -> dict[str, A
     if body.provision_modules:
         needed = list(modules_required_for_services(svc).keys())
         if needed:
+            # Extension install often leaves restjavad / Config Utility restarting (503 HTML).
+            provision_wait = 420 if body.install_prereqs else 300
             try:
                 patched = ensure_modules_provisioned(
                     s.client,
                     needed,
                     level=body.provision_level,
-                    wait_timeout=300,
+                    wait_timeout=provision_wait,
                 )
                 steps.append(
                     {

@@ -632,6 +632,14 @@ next, and each PATCH **retries** (with backoff) while the device reports a busy
 state. If you still see this after other admin activity, wait until the BIG-IP
 finishes its current provisioning cycle, then run **validate + remediate** again.
 
+**Provisioning / Config Utility 503 (“Configuration Utility restarting…”):**
+After AS3/TS RPM install (or a prior module change), iControl REST often returns
+**503** HTML for `GET/PATCH /mgmt/tm/sys/provision` until `restjavad` / Tomcat
+finish restarting. The Web UI and CLI **retry and re-authenticate** for several
+minutes before failing. If remediation still stops here, open the BIG-IP GUI
+until the dashboard loads again, then re-run **validate + remediate** (you can
+uncheck Install RPMs if they already succeeded).
+
 **AVR and Telemetry Streaming (F5 guidance):** F5 documents pointing AVR at the
 TS Log Publisher in [Modifying AVR configuration to use the Log
 Publisher](https://clouddocs.f5.com/products/extensions/f5-telemetry-streaming/latest/avr.html#modifying-avr-configuration-to-use-the-log-publisher)
