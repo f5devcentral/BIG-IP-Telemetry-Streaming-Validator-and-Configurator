@@ -443,6 +443,8 @@ class BigIPClient:
         """
         deadline = time.time() + timeout
         path = "/mgmt/tm/asm/policies?$top=1&$select=name"
+        last_status: int | None = None
+        last_body = ""
         while time.time() < deadline:
             try:
                 r = self._get(path)
@@ -455,7 +457,8 @@ class BigIPClient:
                 continue
             if r.status_code == 200:
                 return
-            text = (r.text or "").lower()
+            last_status, last_body = r.status_code, r.text or ""
+            text = last_body.lower()
             if r.status_code in (401, 403):
                 try:
                     self.reauthenticate()
@@ -463,21 +466,36 @@ class BigIPClient:
                     pass
                 time.sleep(interval)
                 continue
-            transient = r.status_code in (502, 503, 504) or (
-                r.status_code == 400
-                and (
-                    "connection refused" in text
-                    or "connectexception" in text
-                    or "temporarily unavailable" in text
+            # 404 "URI path /mgmt/tm/asm/policies not registered" — right after ASM is
+            # provisioned, restjavad has not registered the ASM REST worker yet. The
+            # device itself says to wait for the /available suffix to be responsive.
+            transient = (
+                r.status_code in (502, 503, 504)
+                or (
+                    r.status_code == 404
+                    and ("not registered" in text or "resterrorresponse" in text)
+                )
+                or (
+                    r.status_code == 400
+                    and (
+                        "connection refused" in text
+                        or "connectexception" in text
+                        or "temporarily unavailable" in text
+                    )
                 )
             )
             if transient:
                 time.sleep(interval)
                 continue
             raise BigIPError(
-                f"ASM policy API returned ({r.status_code}) while waiting for readiness: {r.text[:1200]}"
+                f"ASM policy API returned ({r.status_code}) while waiting for readiness: {last_body[:1200]}"
             )
-        raise BigIPError(f"Timed out after {timeout}s waiting for ASM policy REST ({path})")
+        raise BigIPError(
+            f"Timed out after {timeout}s waiting for ASM policy REST ({path}); "
+            f"last response ({last_status}): {last_body[:800]}. "
+            "If ASM was just provisioned, the REST worker can take several minutes to register — "
+            "wait until the BIG-IP GUI shows ASM active, then re-run validate + remediate."
+        )
 
     def wait_provision_and_rest(self, modules: list[str], timeout: int = 300) -> None:
         """Wait until provisioned modules leave ``none``, then allow REST to settle."""

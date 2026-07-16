@@ -664,6 +664,15 @@ for **`/Common/telemetry_publisher`** or any other path. It then **POSTs**
 with **`{"command":"save"}`** (**`tmsh save sys config`**) so the configuration
 is written to disk.
 
+**ASM 404 (“URI path /mgmt/tm/asm/policies not registered”):** immediately after
+ASM is provisioned, restjavad has not yet registered the ASM REST workers, so
+`GET /mgmt/tm/asm/policies` returns **404** with a `resterrorresponse` telling you
+to wait for the `/available` suffix. This is a **registration race**, not a
+missing module. The remediation path treats this 404 as transient and keeps
+polling (up to 10 minutes when modules were provisioned in the same run). If it
+still times out, wait until ASM shows active in the BIG-IP GUI, then re-run
+**validate + remediate** without re-installing RPMs.
+
 **ASM and AS3 422 (`localhost:8100`, `Connection refused`):** after provisioning
 ASM (or other restarts), AS3 may still return **422** while it queries
 `/mgmt/tm/asm/policies` through an on-box listener (often **localhost:8100**)

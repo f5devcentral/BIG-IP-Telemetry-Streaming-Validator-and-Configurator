@@ -237,8 +237,11 @@ def _session_remediate_impl(session_id: str, body: RemediateBody) -> dict[str, A
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if svc.get("asm"):
+            # Freshly provisioned ASM can take several minutes before restjavad
+            # registers /mgmt/tm/asm/* (404 "not registered" until then).
+            asm_wait = 600 if body.provision_modules else 300
             try:
-                s.client.wait_asm_policy_api_ready(timeout=300)
+                s.client.wait_asm_policy_api_ready(timeout=asm_wait)
             except BigIPError as exc:
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
         try:
