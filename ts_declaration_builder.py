@@ -25,6 +25,10 @@ def _passphrase(secret: str) -> dict[str, Any]:
     return {"cipherText": secret}
 
 
+def _truthy(value: Any) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 _SUMO_HTTP_PATH_MARKER = "/receiver/v1/http/"
 
 
@@ -250,6 +254,11 @@ def build_ts_declaration(
         extra = consumer_params.get("consumerJson")
         if isinstance(extra, dict):
             consumer.update({k: v for k, v in extra.items() if k != "class"})
+
+    # TS-schema property to skip TLS certificate validation on the consumer
+    # connection (self-signed Splunk HEC, ElasticSearch, Generic_HTTP, etc.).
+    if _truthy(consumer_params.get("allowSelfSignedCert")):
+        consumer["allowSelfSignedCert"] = True
 
     decl["TS_Consumer"] = consumer
     return decl

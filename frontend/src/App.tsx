@@ -206,6 +206,19 @@ function ConsumerFields({
     </div>
   );
 
+  // TS Telemetry_Consumer property `allowSelfSignedCert` — skip TLS certificate
+  // validation toward the consumer (self-signed Splunk HEC, ElasticSearch, etc.).
+  const selfSignedField = (
+    <label className="check" key="allowSelfSignedCert">
+      <input
+        type="checkbox"
+        checked={(values.allowSelfSignedCert ?? "") === "true"}
+        onChange={(e) => onChange("allowSelfSignedCert", e.target.checked ? "true" : "")}
+      />
+      Ignore certificate warnings (allow self-signed TLS cert on the consumer)
+    </label>
+  );
+
   if (consumer === "Splunk") {
     return (
       <>
@@ -215,6 +228,7 @@ function ConsumerFields({
         {field("hec_token", "HEC token", "password")}
         {field("format", "Format (optional: legacy | multiMetric)", "text")}
         {field("compressionType", "Compression (optional: gzip | none)", "text")}
+        {selfSignedField}
       </>
     );
   }
@@ -274,27 +288,31 @@ function ConsumerFields({
         {field("method", "HTTP method", "text", "POST")}
         {field("apiKey", "API key / bearer secret (optional)", "password")}
         {field("apiKeyHeader", "Header name for API key (optional)", "text", "x-api-key")}
+        {selfSignedField}
       </>
     );
   }
   if (consumer === "Sumo_Logic") {
     return (
-      <div className="field" key="sumoEndpoint">
-        <label htmlFor="sumoEndpoint">Sumo Logic collector URL (full URL)</label>
-        <textarea
-          id="sumoEndpoint"
-          autoComplete="off"
-          rows={3}
-          spellCheck={false}
-          placeholder="https://&lt;deployment&gt;.sumologic.com/receiver/v1/http/&lt;token&gt;"
-          value={values.sumoEndpoint ?? ""}
-          onChange={(e) => onChange("sumoEndpoint", e.target.value)}
-        />
-        <p className="muted">
-          Paste the full HTTP(S) collector URL. Host, protocol, port, path, and path secret are derived
-          automatically (default port 443 for https, 80 for http when omitted).
-        </p>
-      </div>
+      <>
+        <div className="field" key="sumoEndpoint">
+          <label htmlFor="sumoEndpoint">Sumo Logic collector URL (full URL)</label>
+          <textarea
+            id="sumoEndpoint"
+            autoComplete="off"
+            rows={3}
+            spellCheck={false}
+            placeholder="https://&lt;deployment&gt;.sumologic.com/receiver/v1/http/&lt;token&gt;"
+            value={values.sumoEndpoint ?? ""}
+            onChange={(e) => onChange("sumoEndpoint", e.target.value)}
+          />
+          <p className="muted">
+            Paste the full HTTP(S) collector URL. Host, protocol, port, path, and path secret are derived
+            automatically (default port 443 for https, 80 for http when omitted).
+          </p>
+        </div>
+        {selfSignedField}
+      </>
     );
   }
   if (consumer === "ElasticSearch") {
@@ -308,6 +326,7 @@ function ConsumerFields({
         {field("dataType", "Data type (optional)", "text")}
         {field("username", "Username (optional)", "text")}
         {field("password", "Password (optional)", "password")}
+        {selfSignedField}
       </>
     );
   }
@@ -331,6 +350,7 @@ function ConsumerFields({
         {field("authenticationProtocol", "Auth (optional: SASL-PLAIN, TLS, None)", "text")}
         {field("username", "Username (optional)", "text")}
         {field("kafkaPassword", "Password (optional)", "password")}
+        {selfSignedField}
       </>
     );
   }
@@ -340,6 +360,7 @@ function ConsumerFields({
         {field("host", "Graphite host")}
         {field("protocol", "Protocol", "text", "https")}
         {field("port", "Port", "number", "443")}
+        {selfSignedField}
       </>
     );
   }
@@ -359,6 +380,7 @@ function ConsumerFields({
         {field("port", "Collector port", "number", "4318")}
         {field("metricsPath", "Metrics path (optional)", "text")}
         {field("logsPath", "Logs path (optional)", "text")}
+        {selfSignedField}
       </>
     );
   }
@@ -723,6 +745,9 @@ export default function App() {
                 setConsumer(v);
                 if (v === "Sumo_Logic") {
                   setParams({ sumoEndpoint: "" });
+                } else {
+                  // Security-relevant flag; require an explicit opt-in per consumer.
+                  setParams((p) => ({ ...p, allowSelfSignedCert: "" }));
                 }
               }}
             >

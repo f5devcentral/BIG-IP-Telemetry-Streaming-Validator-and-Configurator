@@ -664,6 +664,19 @@ for **`/Common/telemetry_publisher`** or any other path. It then **POSTs**
 with **`{"command":"save"}`** (**`tmsh save sys config`**) so the configuration
 is written to disk.
 
+**Consumer TLS certificate warnings (self-signed Splunk HEC, etc.):** each
+HTTPS-capable consumer form in the Web UI has an **Ignore certificate warnings**
+checkbox. It sets the TS schema property
+[`allowSelfSignedCert: true`](https://clouddocs.f5.com/products/extensions/f5-telemetry-streaming/latest/advanced-options.html)
+on the composed `Telemetry_Consumer`, so the BIG-IP accepts a self-signed or
+otherwise untrusted certificate when pushing telemetry to the consumer (common
+with lab Splunk HEC on port 8088). Leave it off when the consumer has a valid
+certificate — it disables TLS validation for that connection. API callers can
+pass `"allowSelfSignedCert": true` inside `consumer_params` on
+`POST /api/session/{id}/remediate`. This is separate from **Verify TLS
+certificate** on the connect form, which governs this tool's connection to the
+BIG-IP management interface, not the BIG-IP's connection to the consumer.
+
 **ASM 404 (“URI path /mgmt/tm/asm/policies not registered”):** immediately after
 ASM is provisioned, restjavad has not yet registered the ASM REST workers, so
 `GET /mgmt/tm/asm/policies` returns **404** with a `resterrorresponse` telling you
